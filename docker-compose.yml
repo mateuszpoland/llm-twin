@@ -1,0 +1,140 @@
+name: twin-llm
+
+# Local infrastructure for the LLM Twin project.
+#
+#   zenml / zenml-db   orchestration + its own metadata store (MySQL, required)
+#   warehouse          Postgres + pgvector: documents, chunks, embeddings, samples
+#
+# Everything here is the system of record and runs on this machine.
+# Only three things ever leave it: LLM API calls for instruction
+# backtranslation, the training job (rented GPU), and serving (AWS).
+# The GPU never connects to this database - it consumes a dataset file.
+
+services:
+  zenml-db:
+    image: mysql:8.0
+    container_name: twin_llm_zenml_db
+    # ZenML server deployments require MySQL; SQLite is client-side only.
+    command: ["--default-authentication-plugin=mysql_native_password"]
+    environment:
+      MYSQL_ROOT_PASSWORD: ${ZENML_DB_ROOT_PASSWORD:-zenml}
+    volumes:
+      - zenml_db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${ZENML_DB_ROOT_PASSWORD:-zenml}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    networks: [twin]
+    restart: unless-stopped
+
+  zenml:
+    image: zenmldocker/zenml-server:0.96.4
+    container_name: twin_llm_zenml
+    ports:
+      - "${ZENML_SERVER_PORT:-8237}:8080"
+    environment:
+      ZENML_STORE_URL: mysql://root:${ZENML_DB_ROOT_PASSWORD:-zenml}@zenml-db:3306/zenml
+      ZENML_DEFAULT_USER_NAME: ${ZENML_DEFAULT_USER_NAME:-default}
+      ZENML_DEFAULT_USER_PASSWORD: ${ZENML_DEFAULT_USER_PASSWORD:-zenml}
+      # Skip the browser-based first-run activation wizard.
+      ZENML_SERVER_AUTO_ACTIVATE: "true"
+    depends_on:
+      zenml-db:
+        condition: service_healthy
+    networks: [twin]
+    restart: unless-stopped
+
+  warehouse:
+    image: pgvector/pgvector:0.8.6-pg17
+    container_name: twin_llm_warehouse
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-twin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-twin}
+      POSTGRES_DB: ${POSTGRES_DB:-twin}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - warehouse_data:/var/lib/postgresql/data
+      - ./infra/warehouse/init:/docker-entrypoint-initdb.d:ro
+      # Inspection and demo scripts, runnable with psql -f /sql/<name>.sql
+      - ./sql:/sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-twin} -d ${POSTGRES_DB:-twin}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    networks: [twin]
+    restart: unless-stopped
+
+  # Database viewer. Zed has no built-in one, so the browser is the viewer.
+  adminer:
+    image: adminer:5-standalone
+    container_name: twin_llm_adminer
+    ports:
+      - "${ADMINER_PORT:-8080}:8080"
+    environment:
+      ADMINER_DEFAULT_SERVER: warehouse
+      ADMINER_DESIGN: dracula
+    depends_on:
+      warehouse:
+        condition: service_healthy
+    networks: [twin]
+    restart: unless-stopped
+
+  app:
+    build:
+      context: .
+      dockerfile: docker/app.Dockerfile
+    image: twin-llm/app:dev
+    container_name: twin_llm_app
+    # Run as the host user so files written to mounted volumes are owned by you.
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
+    environment:
+      POSTGRES_HOST: warehouse
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-twin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-twin}
+      POSTGRES_DB: ${POSTGRES_DB:-twin}
+      ZENML_STORE_URL: http://zenml:8080
+      # Non-interactive auth: ZenML reads these instead of a login session.
+      ZENML_STORE_USERNAME: ${ZENML_DEFAULT_USER_NAME:-default}
+      ZENML_STORE_PASSWORD: ${ZENML_DEFAULT_USER_PASSWORD:-zenml}
+      # /app is root-owned from build time; the container runs as the host user.
+      RUFF_CACHE_DIR: /tmp/.ruff_cache
+      COHERE_API_KEY: ${COHERE_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-embed-v4.0}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-1536}
+      PYTHONPYCACHEPREFIX: /tmp/.pycache
+    volumes:
+      # Source is mounted so edits are live without a rebuild.
+      - ./twin:/app/twin
+      - ./migrations:/app/migrations
+      - ./alembic.ini:/app/alembic.ini
+      - ./pipelines:/app/pipelines
+      - ./configs:/app/configs
+      - ./run.py:/app/run.py
+      - ./data:/app/data:ro
+      # ZenML client config and credentials, persisted across restarts.
+      - app_state:/state
+      # Experiment outputs are written here, so results survive the container.
+      - ./.doc:/app/.doc
+    depends_on:
+      warehouse:
+        condition: service_healthy
+    networks: [twin]
+
+volumes:
+  app_state:
+  zenml_db_data:
+  warehouse_data:
+
+networks:
+  twin:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: "10.210.0.0/24"

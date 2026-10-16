@@ -1,0 +1,7 @@
+# Run configuration for the data pipeline.
+#   make pipeline
+# Keeping parameters here rather than in code means a run's settings are
+# recorded alongside its results, instead of living in someone's shell history.
+
+parameters:
+  keep_code: false

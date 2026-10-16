@@ -1,0 +1,38 @@
+[project]
+name = "twin"
+version = "0.1.0"
+description = "LLM Twin - two personal models sharing one base"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "sqlalchemy (>=2.0,<3.0)",
+    "alembic (>=1.14,<2.0)",
+    "psycopg[binary] (>=3.2,<4.0)",
+    "pydantic-settings (>=2.7,<3.0)",
+    "loguru (>=0.7,<0.8)",
+    "typer (>=0.15,<0.16)",
+    "cohere (>=5.13,<6.0)",
+    # Pinned to the server version in docker-compose. ZenML warns loudly
+    # when client and server drift apart.
+    "zenml (==0.96.4)",
+]
+
+[project.scripts]
+twin = "twin.cli:app"
+
+[tool.poetry]
+packages = [{ include = "twin" }]
+
+[tool.poetry.group.dev.dependencies]
+ruff = "^0.9"
+pytest = "^8.3"
+
+[build-system]
+requires = ["poetry-core>=2.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
